@@ -552,23 +552,31 @@ def llama4_query_scale(
     The scale is ``1 + beta * log(1 + floor(pos / original_max))`` at each
     row's absolute position, as in mlx_lm's ``ministral3``. It is exactly 1
     below ``original_max``, so ``None`` is returned when no row reaches it.
+    Computed once per forward and shared by every scaled layer.
     """
+    key = (beta, original_max_position_embeddings)
+    if key in ctx.llama4_query_scales:
+        return ctx.llama4_query_scales[key]
     cu_seqlens = ctx.cu_seqlens
-    assert cu_seqlens is not None
-    offsets = ctx.offsets or [0] * (len(cu_seqlens) - 1)
-    segments = list(zip(cu_seqlens[:-1], cu_seqlens[1:], offsets, strict=True))
-    if all(
-        offset + end - start <= original_max_position_embeddings
+    if cu_seqlens is None or len(ctx.offsets) != len(cu_seqlens) - 1:
+        raise ValueError(
+            "Llama 4 query scaling needs one offset per cu_seqlens segment"
+        )
+    segments = list(zip(cu_seqlens[:-1], cu_seqlens[1:], ctx.offsets, strict=True))
+    scale = None
+    if any(
+        offset + end - start > original_max_position_embeddings
         for start, end, offset in segments
     ):
-        return None
-    positions = mx.concatenate(
-        [mx.arange(offset, offset + end - start) for start, end, offset in segments]
-    )
-    scale = 1 + beta * mx.log(
-        1 + mx.floor(positions / original_max_position_embeddings)
-    )
-    return scale[None, None, :, None]
+        positions = mx.concatenate(
+            [mx.arange(offset, offset + end - start) for start, end, offset in segments]
+        )
+        scale = (
+            1
+            + beta * mx.log(1 + mx.floor(positions / original_max_position_embeddings))
+        )[None, None, :, None]
+    ctx.llama4_query_scales[key] = scale
+    return scale
 
 
 def sdpa_forward(
