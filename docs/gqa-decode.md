@@ -201,9 +201,11 @@ partitions beyond its own KV length, and each reducer reads only that request's
 valid partials in the same order. Compact scratch saves allocation space without
 changing partition selection or removing empty producer workgroups.
 
-Mixed batches use an explicit decode sub-batch. When the native split
-separates the leading ordinary decode rows from the prefill kernel (#851 for
-tiled prefill, and NAX on M5), `sdpa_forward` passes a `GqaDecodeLengthPlan`
+Mixed batches use an explicit decode sub-batch. The native split separates
+the leading ordinary decode rows from the prefill kernel (#851 for tiled
+prefill, and NAX on M5) when the batch carries decode metadata and the decode
+rows hold at least 512 tokens of KV work (rows times the longest decode
+context). `sdpa_forward` passes a `GqaDecodeLengthPlan`
 built from only those rows' context lengths (capability
 `gqa_mixed_decode_plan`). The prefix call then treats rows and sequences
 `0..D-1` as a pure decode batch: the GQA grid, reducer and scratch use `D`
@@ -330,8 +332,12 @@ enablement or performance claims of this two-tier routing policy:
 2. **Mixed prefill/decode:** the decode prefix split by
    [#851](https://github.com/vllm-project/vllm-metal/pull/851) (and its NAX
    counterpart) now uses GQA through a decode-prefix length plan (see the
-   mixed-batch paragraph above). Its threshold (`kMixedDecodeMinContext`) is still
-   the tiled-era 4096 tokens and has not been re-tuned for NAX or GQA.
+   mixed-batch paragraph above). The tiled-era 4096-token context threshold
+   for that split is now a 512-token decode-work floor: on M5, many short
+   decode rows gain the most from the split, while a single 256-token row
+   next to a short NAX prefill was slower split
+   (`tools/benchmark/mixed_decode_split_benchmark.py`). Pre-M5 devices still
+   need their own measurements.
 3. **TurboQuant decode:** `paged_attention_gqa_decode_tq` reads packed K/V
    and their scales in place, dequantizing each lane's slice in registers with
    no per-step materialization of the history. Its partials stay in the

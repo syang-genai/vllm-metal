@@ -256,28 +256,42 @@ def test_primitive_vs_reference_varlen(
 
 
 @pytest.mark.parametrize(
-    "decode_context,head_size,split_decode",
+    "decode_rows,decode_context,head_size,split_decode",
     [
-        (512, 128, False),
-        (4095, 128, False),
-        (4096, 128, True),
-        (4096, 256, True),
-        (4096, 512, True),
+        # Split once rows x longest context reaches 512 decode tokens.
+        (1, 256, 128, False),
+        (1, 511, 128, False),
+        (1, 512, 128, True),
+        (2, 256, 128, True),
+        # Many short rows split: they gain the most.
+        (33, 64, 128, True),
+        (33, 4096, 128, True),
+        (33, 4096, 256, True),
+        (33, 4096, 512, True),
     ],
 )
-def test_mixed_batch_dispatches_decode_by_context(
+def test_mixed_batch_splits_decode_by_work(
+    decode_rows: int,
     decode_context: int,
     head_size: int,
     split_decode: bool,
     force_tiled_prefill,
 ) -> None:
-    """Only long decode contexts pay for a separate kernel dispatch."""
-    decode_rows = 33
+    """Enough decode work takes the decode kernel; prefill rows keep tiled bit-for-bit."""
     seq_lens = [(1, decode_context)] + [(1, 64)] * (decode_rows - 1) + [(32, 64)]
     mx.random.seed(0)
     d = _make_cache_and_inputs(512, 2, 8, seq_lens, head_size=head_size)
-    mixed, _ = _run_attention(d, decode_rows=decode_rows, decode_context=decode_context)
-    whole_tiled, _ = _run_attention(d)
+    ops = get_ops()
+    previous = ops._set_paged_dispatch_diagnostics(True)
+    try:
+        mixed, mixed_family = _run_attention(
+            d, decode_rows=decode_rows, decode_context=decode_context
+        )
+        # Without decode metadata the batch stays on one tiled dispatch.
+        whole_tiled, whole_family = _run_attention(d)
+    finally:
+        mx.synchronize()
+        ops._set_paged_dispatch_diagnostics(previous)
     expected_decode = whole_tiled[:decode_rows]
     if split_decode:
         decode = {
@@ -290,6 +304,8 @@ def test_mixed_batch_dispatches_decode_by_context(
         expected_decode, _ = _run_attention(
             decode, decode_rows=decode_rows, decode_context=decode_context
         )
+    assert whole_family == "tiled_prefill"
+    assert mixed_family == ("mixed_prefill_decode" if split_decode else "tiled_prefill")
     np.testing.assert_array_equal(mixed[:decode_rows], expected_decode)
     np.testing.assert_array_equal(mixed[decode_rows:], whole_tiled[decode_rows:])
 
@@ -304,11 +320,13 @@ def test_mixed_batch_dispatches_decode_by_context(
         (65, 4096, 256, mx.bfloat16, 100, True),
         (3, 4096, 64, mx.float16, 100, True),
         (2, 4096, 512, mx.bfloat16, -1, False),
-        # Below the split threshold the whole batch stays on NAX.
-        (9, 4095, 128, mx.float16, -1, False),
+        # Many short decode rows leave the NAX tile too.
+        (9, 512, 128, mx.float16, -1, False),
+        # Below the decode-work floor the whole batch stays on NAX.
+        (1, 256, 128, mx.float16, -1, False),
     ],
 )
-def test_nax_mixed_batch_splits_long_decode_prefix(
+def test_nax_mixed_batch_splits_decode_prefix(
     decode_rows: int,
     decode_context: int,
     head_size: int,
@@ -317,8 +335,8 @@ def test_nax_mixed_batch_splits_long_decode_prefix(
     use_sinks: bool,
     nax_prefill,
 ) -> None:
-    """Long decode rows leave the NAX tile; prefill rows keep NAX bit-for-bit."""
-    split_decode = decode_context >= 4096
+    """Enough decode work leaves the NAX tile; prefill rows keep NAX bit-for-bit."""
+    split_decode = decode_rows * decode_context >= 512
     seq_lens = (
         [(1, decode_context)] + [(1, 64)] * (decode_rows - 1) + [(129, 259), (64, 64)]
     )
