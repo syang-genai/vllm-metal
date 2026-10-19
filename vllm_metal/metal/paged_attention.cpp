@@ -31,7 +31,7 @@ inline void record_paged_dispatch(PagedDispatch family, int gqa_partition = 0,
 // Split a mixed batch's decode rows only when they carry at least this much
 // KV work (rows x longest decode context). Below it, the extra dispatch costs
 // more than the decode rows' wasted prefill tiles: one 256-token decode row
-// next to a 256-token NAX prefill measured 14% slower split.
+// next to a 256-token NAX prefill measured 16% slower split.
 constexpr int64_t kMixedDecodeMinWork = 512;
 
 // Window mode for spec-decode verification (per-token kernel): query rows
