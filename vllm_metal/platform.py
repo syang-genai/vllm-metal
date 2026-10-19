@@ -341,10 +341,6 @@ class MetalPlatform(Platform):
             for name, enabled in (
                 ("logit_bias", bool(params.logit_bias)),
                 ("min_tokens", params.min_tokens > 0),
-                (
-                    "thinking_token_budget",
-                    getattr(params, "thinking_token_budget", None) is not None,
-                ),
             )
             if enabled
         ]
@@ -367,6 +363,7 @@ class MetalPlatform(Platform):
                     "logprob_token_ids",
                     "prompt_logprobs",
                     "structured_outputs",
+                    "thinking_token_budget",
                 )
                 if getattr(params, name, None) is not None
             ]
@@ -393,6 +390,10 @@ class MetalPlatform(Platform):
                 ),
                 ("top_k", params.top_k > 0),
                 ("top_p", params.top_p < 1.0),
+                (
+                    "thinking_token_budget",
+                    params.thinking_token_budget is not None,
+                ),
             ):
                 if enabled:
                     raise VLLMValidationError(
