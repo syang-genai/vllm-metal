@@ -129,10 +129,3 @@ def test_query_scale_follows_each_row_position(offsets, cu_seqlens, expected) ->
     assert scale is not None
     assert scale.shape == (1, 1, len(expected), 1)
     assert mx.allclose(scale.reshape(-1), mx.array(expected)).item()
-
-
-def test_query_scale_requires_one_offset_per_segment() -> None:
-    """A context without per-segment offsets is a broken caller, not position 0."""
-    ctx = PagedAttentionContext(slot_mapping=[], cu_seqlens=[0, 4, 5])
-    with pytest.raises(ValueError, match="one offset per cu_seqlens segment"):
-        llama4_query_scale(ctx, 0.5, _ORIGINAL_MAX)

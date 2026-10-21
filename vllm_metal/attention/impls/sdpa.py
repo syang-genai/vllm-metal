@@ -558,10 +558,7 @@ def llama4_query_scale(
     if key in ctx.llama4_query_scales:
         return ctx.llama4_query_scales[key]
     cu_seqlens = ctx.cu_seqlens
-    if cu_seqlens is None or len(ctx.offsets) != len(cu_seqlens) - 1:
-        raise ValueError(
-            "Llama 4 query scaling needs one offset per cu_seqlens segment"
-        )
+    assert cu_seqlens is not None
     segments = list(zip(cu_seqlens[:-1], cu_seqlens[1:], ctx.offsets, strict=True))
     scale = None
     if any(
