@@ -29,9 +29,9 @@ inline void record_paged_dispatch(PagedDispatch family, int gqa_partition = 0,
 }
 
 // Split a mixed batch's decode rows only when they carry at least this much
-// KV work (rows x longest decode context). Below it, the extra dispatch costs
-// more than the decode rows' wasted prefill tiles: one 256-token decode row
-// next to a 256-token NAX prefill measured 16% slower split.
+// KV work (the sum of their context lengths). Below it, the extra dispatch
+// costs more than the decode rows' wasted prefill tiles: one 256-token decode
+// row next to a 256-token NAX prefill measured 16% slower split.
 constexpr int64_t kMixedDecodeMinWork = 512;
 
 // Window mode for spec-decode verification (per-token kernel): query rows
@@ -651,13 +651,17 @@ static PagedAttentionPlan select_paged_attention_route(
   // sequence would otherwise occupy a whole BQ-row prefill tile with no
   // KV-length parallelism. Gate on total decode work, not context length:
   // many short rows gain the most from the split
-  // (tools/benchmark/mixed_decode_split_benchmark.py). Spec verify windows
-  // keep their whole-batch route.
+  // (tools/benchmark/mixed_decode_split_benchmark.py). The decode-prefix
+  // length plan carries the exact sum. Without one, the longest row is a
+  // lower bound on it, so uneven rows are never split on overcounted work.
+  // Spec verify windows keep their whole-batch route.
+  const int64_t decode_work =
+      m.gqa_length_plan.num_requests == m.num_decode_requests
+      ? m.gqa_length_plan.total_length : m.max_decode_context_len;
   const bool split_mixed_batch = m.num_decode_requests > 0
       && m.num_decode_requests < num_seqs
       && m.num_decode_tokens == m.num_decode_requests
-      && static_cast<int64_t>(m.num_decode_requests) * m.max_decode_context_len
-          >= kMixedDecodeMinWork
+      && decode_work >= kMixedDecodeMinWork
       && (use_nax || tile_config.has_value());
   PagedAttentionPlan plan;
   plan.total_q_tokens = total_q_tokens;
