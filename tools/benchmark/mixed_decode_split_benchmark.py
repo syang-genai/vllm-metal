@@ -205,8 +205,7 @@ class Arms:
         mx.eval(*vars(self.decode_x).values(), *vars(self.prefill_x).values())
 
     def _call(self, x: Inputs, max_seq_len: int, **kwargs) -> mx.array:
-        out = mx.array(0)
-        self.ops.paged_attention_primitive(
+        return self.ops.paged_attention_primitive(
             x.query,
             x.key_cache,
             x.value_cache,
@@ -219,10 +218,8 @@ class Arms:
             self.shape.block_size,
             max_seq_len,
             -1,
-            out,
             **kwargs,
         )
-        return out
 
     def _nax(self, work, prefill_work=None) -> dict[str, int]:
         return nax_split_kwargs(
