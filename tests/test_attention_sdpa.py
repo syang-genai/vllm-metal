@@ -143,17 +143,18 @@ def _make_inner(
     *,
     with_v_proj: bool = True,
     with_v_norm: bool = False,
+    head_dim: int = _HEAD_DIM,
     dtype: mx.Dtype = mx.float32,
 ) -> SimpleNamespace:
     """Build a fake Attention module matching sdpa_forward's contract."""
-    q_weight = mx.ones((_N_HEADS * _HEAD_DIM, _HIDDEN), dtype=dtype)
-    k_weight = mx.ones((_N_KV_HEADS * _HEAD_DIM, _HIDDEN), dtype=dtype)
-    v_weight = mx.ones((_N_KV_HEADS * _HEAD_DIM, _HIDDEN), dtype=dtype)
+    q_weight = mx.ones((_N_HEADS * head_dim, _HIDDEN), dtype=dtype)
+    k_weight = mx.ones((_N_KV_HEADS * head_dim, _HIDDEN), dtype=dtype)
+    v_weight = mx.ones((_N_KV_HEADS * head_dim, _HIDDEN), dtype=dtype)
 
     inner = SimpleNamespace(
         n_heads=_N_HEADS,
         n_kv_heads=_N_KV_HEADS,
-        scale=_HEAD_DIM**-0.5,
+        scale=head_dim**-0.5,
         q_proj=_FakeLinear(q_weight),
         k_proj=_FakeLinear(k_weight),
         rope=_identity_rope,
@@ -1035,27 +1036,19 @@ class TestSDPAForward:
                     assert spy.calls[-1].gqa_length_plan == next_plan
                     assert spy.calls[-1].num_decode_requests == len(next_plan)
 
-    @pytest.mark.parametrize("disabled", [False, True])
+    @pytest.mark.parametrize(
+        ("disabled", "expected_plan"), [(False, (2, 4)), (True, None)]
+    )
     def test_turboquant_decode_batch_forwards_gqa_metadata(
-        self, monkeypatch, disabled
+        self, monkeypatch, disabled, expected_plan
     ) -> None:
-        """A whole TurboQuant decode batch reaches native GQA routing like FP16."""
         monkeypatch.setenv("VLLM_METAL_DISABLE_GQA_DECODE", str(int(disabled)))
         head_dim = 64
         prepare_grouped([([[0]], 1), ([[1]], 3)], [], (8,))
         ctx = get_context()
         spy = _TurboQuantRoutingOpsSpy()
-        weight = mx.ones((_N_HEADS * head_dim, _HIDDEN))
-        inner = SimpleNamespace(
-            n_heads=_N_HEADS,
-            n_kv_heads=_N_KV_HEADS,
-            scale=head_dim**-0.5,
-            q_proj=_FakeLinear(weight),
-            k_proj=_FakeLinear(weight),
-            v_proj=_FakeLinear(weight),
-            rope=_identity_rope,
-            o_proj=lambda out: out,
-        )
+        inner = _make_inner(head_dim=head_dim)
+        inner.o_proj = lambda out: out
         cache = MetalPagedKVCache(
             num_layers=1,
             num_kv_heads=_N_KV_HEADS,
@@ -1069,17 +1062,19 @@ class TestSDPAForward:
         )
         x = mx.ones((1, 2, _HIDDEN), mx.float16)
         zeros = mx.zeros((1, 2, _N_HEADS * head_dim), mx.float16)
+
         with (
             patch.object(sdpa_mod, "get_ops", return_value=spy),
             patch.object(sdpa_mod, "truncate_padded_output", return_value=zeros),
         ):
             sdpa_forward(inner, x, ctx, cache, layer_idx=0)
+
         call = spy.calls[-1]
         assert call.use_turboquant
         assert call.gqa_disabled is disabled
         assert (call.num_decode_requests, call.num_decode_tokens) == (2, 2)
         assert call.max_decode_context_len == 4
-        assert call.gqa_length_plan == (None if disabled else (2, 4))
+        assert call.gqa_length_plan == expected_plan
 
     @pytest.mark.parametrize(
         "supported,kind",

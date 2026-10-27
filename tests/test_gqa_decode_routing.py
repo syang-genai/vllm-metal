@@ -498,10 +498,8 @@ def test_special_attention_features_use_fallback(feature):
     _assert_close(out, ref, mx.float16)
 
 
-@pytest.mark.parametrize("gqa_disabled", [False, True])
-def test_turboquant_takes_p256_with_dequantized_reference(gqa_disabled) -> None:
-    """TurboQuant decode takes the GQA producer at P256, even where P512 qualifies."""
-    out, ref = _run_primitive(
+def _run_long_turboquant_decode(*, gqa_disabled: bool) -> tuple[mx.array, mx.array]:
+    return _run_primitive(
         [65536],
         mx.float16,
         interleaved=False,
@@ -511,11 +509,19 @@ def test_turboquant_takes_p256_with_dequantized_reference(gqa_disabled) -> None:
         turboquant=True,
         gqa_disabled=gqa_disabled,
     )
-    if gqa_disabled:
-        _assert_fallback()
-    else:
-        assert _dispatch_family() == "gqa_decode"
-        assert get_ops().last_gqa_partition_size() == 256
+
+
+def test_turboquant_takes_p256_with_dequantized_reference() -> None:
+    """TurboQuant decode takes the GQA producer at P256, even where P512 qualifies."""
+    out, ref = _run_long_turboquant_decode(gqa_disabled=False)
+    assert _dispatch_family() == "gqa_decode"
+    assert get_ops().last_gqa_partition_size() == 256
+    _assert_close(out, ref, mx.float16)
+
+
+def test_turboquant_kill_switch_keeps_fallback() -> None:
+    out, ref = _run_long_turboquant_decode(gqa_disabled=True)
+    _assert_fallback()
     _assert_close(out, ref, mx.float16)
 
 

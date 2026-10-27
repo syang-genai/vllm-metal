@@ -603,30 +603,32 @@ def llama4_query_scale(
     return scale
 
 
-def _decode_routing_kwargs(
-    ctx: PagedAttentionContext, num_query_rows: int, ops: Any
-) -> dict[str, Any]:
-    """Decode routing keywords for a call over the whole batch's query rows.
-
-    Carries the GQA kill switch, the scheduler's decode counts, and the CPU
-    length plan for ordinary decode rows (every row of a decode batch, or the
-    leading decode rows of a mixed batch). Keywords an older native build does
-    not advertise are omitted.
-    """
+def _gqa_disabled_kwargs(ctx: PagedAttentionContext, ops: Any) -> dict[str, Any]:
+    """The GQA kill switch for any native call, gated on build support."""
     if ctx.paged_native_capabilities is None:
         ctx.paged_native_capabilities = paged_attention_capabilities(ops)
     capabilities = ctx.paged_native_capabilities
-    kwargs: dict[str, Any] = {}
-    if ctx.gqa_disabled:
-        if capabilities["gqa_disable"]:
-            kwargs["gqa_disabled"] = True
-        elif capabilities["gqa_decode"]:
-            # Never silently ignore a kill switch on an unrecognized GQA build.
-            raise RuntimeError(
-                "Loaded native GQA build does not advertise disable support; "
-                "rebuild the vllm-metal native extension."
-            )
-        # Pre-GQA native builds already use the established attention path.
+    if not ctx.gqa_disabled:
+        return {}
+    if capabilities["gqa_disable"]:
+        return {"gqa_disabled": True}
+    if capabilities["gqa_decode"]:
+        # Never silently ignore a kill switch on an unrecognized GQA build.
+        raise RuntimeError(
+            "Loaded native GQA build does not advertise disable support; "
+            "rebuild the vllm-metal native extension."
+        )
+    # Pre-GQA native builds already use the established attention path.
+    return {}
+
+
+def _whole_batch_decode_routing_kwargs(
+    ctx: PagedAttentionContext, num_query_rows: int, ops: Any
+) -> dict[str, Any]:
+    """Decode routing keywords for a call over every query row of the batch."""
+    kwargs = _gqa_disabled_kwargs(ctx, ops)
+    capabilities = ctx.paged_native_capabilities
+    assert capabilities is not None
     if capabilities["decode_routing_metadata"]:
         kwargs.update(
             num_decode_requests=ctx.num_decode_requests,
@@ -1027,7 +1029,9 @@ def sdpa_forward(
             # A whole decode batch carries the same routing metadata as the
             # ordinary cache path, so native code can admit it to GQA decode.
             out = quantized_attention(
-                q_3d, meta, **_decode_routing_kwargs(ctx, q_3d.shape[0], ops)
+                q_3d,
+                meta,
+                **_whole_batch_decode_routing_kwargs(ctx, q_3d.shape[0], ops),
             )
         elif plan is None:
             out = quantized_attention(q_3d, meta)
@@ -1084,7 +1088,13 @@ def sdpa_forward(
             )
             if plan.fallback is not None:
                 fallback = plan.fallback
-                rest = quantized_attention(q_3d[fallback.query_indices], fallback)
+                # A lone compressed decode row would otherwise be admitted to
+                # GQA decode as a one-request batch despite the kill switch.
+                rest = quantized_attention(
+                    q_3d[fallback.query_indices],
+                    fallback,
+                    **_gqa_disabled_kwargs(ctx, ops),
+                )
                 out = mx.concatenate((out, rest), axis=0)[plan.restore_indices]
             # Finish this lane before building the next layer. Otherwise MLX
             # can keep several materialized K/V pairs in flight, multiplying
@@ -1098,7 +1108,7 @@ def sdpa_forward(
             del k16, v16
     else:
         paged_kwargs: dict[str, Any] = dict(mm_kwargs)
-        paged_kwargs.update(_decode_routing_kwargs(ctx, q_3d.shape[0], ops))
+        paged_kwargs.update(_whole_batch_decode_routing_kwargs(ctx, q_3d.shape[0], ops))
         capabilities = ctx.paged_native_capabilities
         num_decode = ctx.num_decode_requests
         if capabilities["nax_split_hint"] and q_3d.shape[0] > len(ctx.context_lens):
