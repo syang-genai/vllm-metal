@@ -83,11 +83,13 @@ using GqaPartitionOffsets = std::array<std::vector<int64_t>, 2>;
 struct GqaDecodeLengthPlan {
   int num_requests = 0;
   int max_length = 0;
+  int64_t total_length = 0;
   std::array<int64_t, 2> full_partitions = {};
   std::shared_ptr<const GqaPartitionOffsets> partition_offsets;
 
   bool operator==(const GqaDecodeLengthPlan& other) const {
     return num_requests == other.num_requests && max_length == other.max_length &&
+        total_length == other.total_length &&
         full_partitions == other.full_partitions &&
         (partition_offsets == other.partition_offsets ||
          (partition_offsets && other.partition_offsets &&
@@ -102,6 +104,7 @@ extern std::atomic<bool> g_dispatch_diagnostics_enabled;
 extern std::atomic<int> g_last_nax_split;
 extern bool nax_lib_ready_;
 extern bool nax_enabled_;
+int override_mixed_decode_floor_for_test(int floor);
 template <typename Lengths>
 static GqaDecodeLengthPlan gqa_decode_length_plan(const Lengths& context_lens) {
   GqaDecodeLengthPlan plan;
@@ -117,6 +120,7 @@ static GqaDecodeLengthPlan gqa_decode_length_plan(const Lengths& context_lens) {
     if (length <= 0) return {};
     ++plan.num_requests;
     plan.max_length = std::max(plan.max_length, length);
+    plan.total_length += length;
     for (size_t i = 0; i < kGqaPartitionSizes.size(); ++i) {
       plan.full_partitions[i] += length / kGqaPartitionSizes[i];
       if (offsets) {
